@@ -15,7 +15,7 @@ Though, better fit for benchmarking than production use, it provides a simple wa
 
 ```bash
 # Requires Go 1.20+
-go install github.com/codycody31/llmbench@latest
+go install go.codycody31.dev/llmbench@latest
 ```
 
 ## Usage
