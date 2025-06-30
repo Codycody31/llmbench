@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,26 @@ type metric struct {
 	comp int
 	tot  int
 	tps  float64
+}
+
+type logFields map[string]any
+
+func logEvent(run int, event string, fields logFields) {
+	parts := make([]string, 0, len(fields)+2)
+	parts = append(parts, fmt.Sprintf("Run %03d", run), event)
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%v", k, fields[k]))
+	}
+	log.Println(strings.Join(parts, " | "))
+}
+
+func init() {
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 }
 
 func countTokens(text string) int {
@@ -89,10 +110,13 @@ func callAPI(
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
 
+	promptTokens := countTokens(prompt)
+	logEvent(run, "request", logFields{"model": model, "stream": stream, "prompt_tokens": promptTokens})
+
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("Run %03d │ transport error: %v", run, err)
+		logEvent(run, "error", logFields{"type": "transport", "error": err.Error()})
 		return
 	}
 	elapsed := time.Since(start)
@@ -100,13 +124,13 @@ func callAPI(
 
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
-		log.Printf("Run %03d │ HTTP %d │ %s", run, resp.StatusCode, strings.TrimSpace(string(raw)))
+		logEvent(run, "error", logFields{"type": "http", "status_code": resp.StatusCode, "response": strings.TrimSpace(string(raw))})
 		return
 	}
 
 	if stream {
 		reader := bufio.NewReader(resp.Body)
-		fmt.Printf("Run %03d │ streaming...\n", run)
+		logEvent(run, "stream-start", logFields{"model": model})
 
 		var contentBuilder strings.Builder
 
@@ -148,11 +172,24 @@ func callAPI(
 			}
 		}
 
-		fmt.Printf("Run %03d │ stream complete │ done_reason=%s │ total_duration=%d\n",
-			run, meta.DoneReason, meta.TotalDuration)
-
+		elapsedStream := time.Since(start)
 		comp := countTokens(contentBuilder.String())
-		ch <- metric{comp: comp, tot: comp, tps: float64(comp) / elapsed.Seconds()}
+
+		pTok := promptTokens
+		if style == "ollama" {
+			pTok = meta.PromptEvalCount
+		}
+
+		logEvent(run, "success", logFields{
+			"latency_ms":        elapsedStream.Seconds() * 1e3,
+			"done_reason":       meta.DoneReason,
+			"prompt_tokens":     pTok,
+			"completion_tokens": comp,
+			"total_tokens":      comp,
+			"tok_per_sec":       float64(comp) / elapsedStream.Seconds(),
+		})
+
+		ch <- metric{comp: comp, tot: comp, tps: float64(comp) / elapsedStream.Seconds()}
 		return
 	}
 
@@ -167,30 +204,28 @@ func callAPI(
 	if style == "ollama" {
 		var or ollamaResp
 		if err := json.Unmarshal(raw, &or); err != nil {
-			log.Printf("Run %03d │ JSON parse error: %v", run, err)
+			logEvent(run, "error", logFields{"type": "json_parse", "error": err.Error()})
 			return
 		}
 		comp = countTokens(or.Message.Content)
 		tot = comp
 		tps = float64(comp) / elapsed.Seconds()
-		log.Printf("Run %03d │ %4.0f ms │ oltokens=%d │ approx tok/s=%.1f",
-			run, elapsed.Seconds()*1e3, comp, tps)
+		logEvent(run, "success", logFields{"latency_ms": elapsed.Seconds()*1e3, "prompt_tokens": promptTokens, "completion_tokens": comp, "total_tokens": comp, "tok_per_sec": tps})
 	} else {
 		var ok successResp
 		if err := json.Unmarshal(raw, &ok); err != nil {
 			var apiErr errorResp
 			if json.Unmarshal(raw, &apiErr) == nil && apiErr.Error != "" {
-				log.Printf("Run %03d │ API error: %s", run, apiErr.Error)
+				logEvent(run, "error", logFields{"type": "api", "error": apiErr.Error})
 			} else {
-				log.Printf("Run %03d │ JSON parse error: %v", run, err)
+				logEvent(run, "error", logFields{"type": "json_parse", "error": err.Error()})
 			}
 			return
 		}
 		comp = ok.Usage.CompletionTokens
 		tot = ok.Usage.TotalTokens
 		tps = float64(comp) / elapsed.Seconds()
-		log.Printf("Run %03d │ %4.0f ms │ completion=%d │ total=%d │ %.1f tok/s",
-			run, elapsed.Seconds()*1e3, comp, tot, tps)
+		logEvent(run, "success", logFields{"latency_ms": elapsed.Seconds()*1e3, "prompt_tokens": ok.Usage.PromptTokens, "completion_tokens": comp, "total_tokens": tot, "tok_per_sec": tps})
 	}
 
 	ch <- metric{comp: comp, tot: tot, tps: tps}
