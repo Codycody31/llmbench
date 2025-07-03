@@ -25,7 +25,13 @@ type usageBlock struct {
 }
 
 type successResp struct {
-	Usage usageBlock `json:"usage"`
+	Usage   usageBlock `json:"usage"`
+	Choices []struct {
+		Message struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
 }
 
 type errorResp struct {
@@ -188,6 +194,17 @@ func callAPI(
 				continue
 			}
 
+			// OpenAI streams are sent via Server-Sent Events prefixed with "data: ".
+			// Strip the prefix so we only keep the raw JSON payload.
+			if strings.HasPrefix(line, "data: ") {
+				line = strings.TrimPrefix(line, "data: ")
+			}
+
+			// OpenAI terminates the stream with a single "[DONE]" message.
+			if line == "[DONE]" {
+				break
+			}
+
 			if style == "ollama" && strings.Contains(line, "\"done_reason\"") {
 				_ = json.Unmarshal([]byte(line), &meta)
 				break
@@ -195,13 +212,38 @@ func callAPI(
 
 			var chunk map[string]any
 			if err := json.Unmarshal([]byte(line), &chunk); err == nil {
-				if msg, ok := chunk["message"].(map[string]any); ok {
-					if cstr, ok2 := msg["content"].(string); ok2 {
-						contentBuilder.WriteString(cstr)
-						if storeData {
-							err, _ := storeRunData(dataDir, run, "response", contentBuilder.String())
-							if err != nil {
-								logEvent(run, "error", logFields{"type": "store_data", "error": err.Error()})
+				if style == "ollama" {
+					// Ollama format: { "message": { "content": "..." } }
+					if msg, ok := chunk["message"].(map[string]any); ok {
+						if cstr, ok2 := msg["content"].(string); ok2 {
+							contentBuilder.WriteString(cstr)
+							if storeData {
+								err, _ := storeRunData(dataDir, run, "response", contentBuilder.String())
+								if err != nil {
+									logEvent(run, "error", logFields{"type": "store_data", "error": err.Error()})
+								}
+							}
+						}
+					}
+				} else {
+					// OpenAI format: { "choices": [ { "delta": { "content": "..." }, "finish_reason": null } ] }
+					if choices, ok := chunk["choices"].([]any); ok && len(choices) > 0 {
+						if choice, okChoice := choices[0].(map[string]any); okChoice {
+							if delta, okDelta := choice["delta"].(map[string]any); okDelta {
+								if cstr, okStr := delta["content"].(string); okStr {
+									contentBuilder.WriteString(cstr)
+									if storeData {
+										err, _ := storeRunData(dataDir, run, "response", contentBuilder.String())
+										if err != nil {
+											logEvent(run, "error", logFields{"type": "store_data", "error": err.Error()})
+										}
+									}
+								}
+							}
+
+							// If OpenAI signals the end of the stream via finish_reason, exit the loop.
+							if fr, okFinish := choice["finish_reason"].(string); okFinish && fr != "" && fr != "null" {
+								break
 							}
 						}
 					}
@@ -315,7 +357,7 @@ func callAPI(
 		}
 		logEvent(run, "success", metrics.ToMap())
 		if storeData {
-			err, filename := storeRunData(dataDir, run, "response", string(raw))
+			err, filename := storeRunData(dataDir, run, "response", ok.Choices[0].Message.Content)
 			if err != nil {
 				logEvent(run, "error", logFields{"type": "store_data", "error": err.Error()})
 			}
@@ -355,6 +397,8 @@ func main() {
 			&cli.BoolFlag{Name: "store-data", Value: false, Usage: "store data files (responses, metrics)"},
 		},
 		Action: func(c *cli.Context) error {
+			start := time.Now()
+
 			style := strings.ToLower(c.String("style"))
 
 			dataDir := c.String("data-dir")
@@ -412,10 +456,12 @@ func main() {
 			var sumC, sumT int
 			var sumTPS float64
 			var good int
+			var totalElapsed time.Duration
 			for m := range results {
 				sumC += m.CompletionTokens
 				sumT += m.TotalTokens
 				sumTPS += m.TokPerSec
+				totalElapsed += time.Duration(m.LatencyMs) * time.Millisecond
 				good++
 			}
 
@@ -447,6 +493,8 @@ func main() {
 					return fmt.Errorf("error unloading model: %s (status code %d)", strings.TrimSpace(string(raw)), resp.StatusCode)
 				}
 			}
+			fmt.Printf("Total elapsed time       : %s\n", totalElapsed)
+			fmt.Printf("Total time taken         : %s\n", time.Duration(time.Since(start)).Round(time.Millisecond))
 
 			return nil
 		},

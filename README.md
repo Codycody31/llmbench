@@ -49,7 +49,7 @@ llmbench [flags]
 ```bash
 # OpenAI style (non-streaming)
 export LLM_API_KEY="sk-..."
-llmbench --runs 50 --concurrency 10 --model gpt-4 --prompt "Hello, world!"
+llmbench --runs 5 --model gpt-4o-mini --prompt "Hello, world!"
 
 # Ollama style (non-streaming)
 llmbench --style ollama \
@@ -65,6 +65,29 @@ llmbench --style openai --stream \
 llmbench --style ollama --stream \
          --base-url http://localhost:11434 \
          --runs 1 --model llama2 --prompt "How are you today?"
+```
+
+### gpt-4o-mini
+
+```bash
+2025/07/03 11:27:20.850482 Run 003 | request | model=gpt-4o-mini | prompt_tokens=2 | stream=false
+2025/07/03 11:27:20.850772 Run 002 | request | model=gpt-4o-mini | prompt_tokens=2 | stream=false
+2025/07/03 11:27:20.850782 Run 004 | request | model=gpt-4o-mini | prompt_tokens=2 | stream=false
+2025/07/03 11:27:20.850813 Run 001 | request | model=gpt-4o-mini | prompt_tokens=2 | stream=false
+2025/07/03 11:27:20.850862 Run 005 | request | model=gpt-4o-mini | prompt_tokens=2 | stream=false
+2025/07/03 11:27:21.701164 Run 005 | success | completion_tokens=9 | latency_ms=850.135831 | model=gpt-4o-mini | prompt_tokens=2 | run=5 | stream=false | tok_per_sec=22.34936972089581 | total_tokens=19
+2025/07/03 11:27:21.795267 Run 002 | success | completion_tokens=9 | latency_ms=944.420699 | model=gpt-4o-mini | prompt_tokens=2 | run=2 | stream=false | tok_per_sec=20.118152874156774 | total_tokens=19
+2025/07/03 11:27:21.838177 Run 004 | success | completion_tokens=9 | latency_ms=987.299588 | model=gpt-4o-mini | prompt_tokens=2 | run=4 | stream=false | tok_per_sec=19.244411960597315 | total_tokens=19
+2025/07/03 11:27:21.927233 Run 001 | success | completion_tokens=9 | latency_ms=1076.323388 | model=gpt-4o-mini | prompt_tokens=2 | run=1 | stream=false | tok_per_sec=17.65268711228637 | total_tokens=19
+2025/07/03 11:27:22.657458 Run 003 | success | completion_tokens=9 | latency_ms=1806.808911 | model=gpt-4o-mini | prompt_tokens=2 | run=3 | stream=false | tok_per_sec=10.515777227091615 | total_tokens=19
+
+=== Summary ===
+Successful calls  : 5 / 5
+Avg completion tokens    : 9.00
+Avg total tokens         : 19.00
+Avg tokens / sec         : 17.98
+Total completion tokens  : 45
+Total tokens             : 95
 ```
 
 ## License
