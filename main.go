@@ -39,13 +39,42 @@ type ollamaResp struct {
 	} `json:"message"`
 }
 
-type metric struct {
-	comp int
-	tot  int
-	tps  float64
+type runMetrics struct {
+	Run              int     `json:"run"`
+	Model            string  `json:"model"`
+	Stream           bool    `json:"stream"`
+	PromptTokens     int     `json:"prompt_tokens"`
+	CompletionTokens int     `json:"completion_tokens"`
+	TotalTokens      int     `json:"total_tokens"`
+	LatencyMs        float64 `json:"latency_ms"`
+	TokPerSec        float64 `json:"tok_per_sec"`
+}
+
+func (rm runMetrics) ToMap() map[string]any {
+	return map[string]any{
+		"run":               rm.Run,
+		"model":             rm.Model,
+		"stream":            rm.Stream,
+		"prompt_tokens":     rm.PromptTokens,
+		"completion_tokens": rm.CompletionTokens,
+		"total_tokens":      rm.TotalTokens,
+		"latency_ms":        rm.LatencyMs,
+		"tok_per_sec":       rm.TokPerSec,
+	}
 }
 
 type logFields map[string]any
+
+func storeRunData(dataDir string, run int, dataType string, content string) (error, string) {
+	filename := fmt.Sprintf("%s/%03d.%s.txt", dataDir, run, dataType)
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return fmt.Errorf("error creating directory %s: %w", dataDir, err), filename
+	}
+	if err := os.WriteFile(filename, []byte(content), 0644); err != nil {
+		return fmt.Errorf("error writing %s: %w", filename, err), filename
+	}
+	return nil, filename
+}
 
 func logEvent(run int, event string, fields logFields) {
 	parts := make([]string, 0, len(fields)+2)
@@ -77,8 +106,10 @@ func callAPI(
 	maxTokens int,
 	style string,
 	stream bool,
-	ch chan<- metric,
+	ch chan<- runMetrics,
 	wg *sync.WaitGroup,
+	dataDir string,
+	storeData bool,
 ) {
 	defer wg.Done()
 
@@ -167,29 +198,56 @@ func callAPI(
 				if msg, ok := chunk["message"].(map[string]any); ok {
 					if cstr, ok2 := msg["content"].(string); ok2 {
 						contentBuilder.WriteString(cstr)
+						if storeData {
+							err, _ := storeRunData(dataDir, run, "response", contentBuilder.String())
+							if err != nil {
+								logEvent(run, "error", logFields{"type": "store_data", "error": err.Error()})
+							}
+						}
 					}
 				}
 			}
 		}
 
 		elapsedStream := time.Since(start)
-		comp := countTokens(contentBuilder.String())
 
 		pTok := promptTokens
 		if style == "ollama" {
 			pTok = meta.PromptEvalCount
 		}
 
-		logEvent(run, "success", logFields{
-			"latency_ms":        elapsedStream.Seconds() * 1e3,
-			"done_reason":       meta.DoneReason,
-			"prompt_tokens":     pTok,
-			"completion_tokens": comp,
-			"total_tokens":      comp,
-			"tok_per_sec":       float64(comp) / elapsedStream.Seconds(),
-		})
+		runMetrics := runMetrics{
+			Run:              run,
+			Model:            model,
+			Stream:           stream,
+			PromptTokens:     pTok,
+			CompletionTokens: countTokens(contentBuilder.String()),
+			TotalTokens:      countTokens(contentBuilder.String()),
+			LatencyMs:        elapsedStream.Seconds() * 1e3,
+			TokPerSec:        float64(countTokens(contentBuilder.String())) / elapsedStream.Seconds(),
+		}
 
-		ch <- metric{comp: comp, tot: comp, tps: float64(comp) / elapsedStream.Seconds()}
+		logEvent(run, "success", runMetrics.ToMap())
+
+		ch <- runMetrics
+
+		if storeData {
+			err, filename := storeRunData(dataDir, run, "response", contentBuilder.String())
+			if err != nil {
+				logEvent(run, "error", logFields{"type": "store_data", "error": err.Error()})
+			}
+			logEvent(run, "response-stored", logFields{"file": filename})
+			data, err := json.Marshal(runMetrics)
+			if err != nil {
+				logEvent(run, "error", logFields{"type": "json_marshal", "error": err.Error()})
+			}
+			err, filename = storeRunData(dataDir, run, "metrics", string(data))
+			if err != nil {
+				logEvent(run, "error", logFields{"type": "store_data", "error": err.Error()})
+			}
+			logEvent(run, "metrics-stored", logFields{"file": filename})
+		}
+
 		return
 	}
 
@@ -198,8 +256,7 @@ func callAPI(
 		raw = raw[i:]
 	}
 
-	var comp, tot int
-	var tps float64
+	var metrics runMetrics
 
 	if style == "ollama" {
 		var or ollamaResp
@@ -207,10 +264,34 @@ func callAPI(
 			logEvent(run, "error", logFields{"type": "json_parse", "error": err.Error()})
 			return
 		}
-		comp = countTokens(or.Message.Content)
-		tot = comp
-		tps = float64(comp) / elapsed.Seconds()
-		logEvent(run, "success", logFields{"latency_ms": elapsed.Seconds()*1e3, "prompt_tokens": promptTokens, "completion_tokens": comp, "total_tokens": comp, "tok_per_sec": tps})
+
+		metrics = runMetrics{
+			Run:              run,
+			Model:            model,
+			Stream:           stream,
+			PromptTokens:     promptTokens,
+			CompletionTokens: countTokens(or.Message.Content),
+			TotalTokens:      countTokens(or.Message.Content),
+			LatencyMs:        elapsed.Seconds() * 1e3,
+			TokPerSec:        float64(countTokens(or.Message.Content)) / elapsed.Seconds(),
+		}
+		logEvent(run, "success", metrics.ToMap())
+		if storeData {
+			err, filename := storeRunData(dataDir, run, "response", or.Message.Content)
+			if err != nil {
+				logEvent(run, "error", logFields{"type": "store_data", "error": err.Error()})
+			}
+			logEvent(run, "response-stored", logFields{"file": filename})
+			data, err := json.Marshal(metrics)
+			if err != nil {
+				logEvent(run, "error", logFields{"type": "json_marshal", "error": err.Error()})
+			}
+			err, filename = storeRunData(dataDir, run, "metrics", string(data))
+			if err != nil {
+				logEvent(run, "error", logFields{"type": "store_data", "error": err.Error()})
+			}
+			logEvent(run, "metrics-stored", logFields{"file": filename})
+		}
 	} else {
 		var ok successResp
 		if err := json.Unmarshal(raw, &ok); err != nil {
@@ -222,13 +303,36 @@ func callAPI(
 			}
 			return
 		}
-		comp = ok.Usage.CompletionTokens
-		tot = ok.Usage.TotalTokens
-		tps = float64(comp) / elapsed.Seconds()
-		logEvent(run, "success", logFields{"latency_ms": elapsed.Seconds()*1e3, "prompt_tokens": ok.Usage.PromptTokens, "completion_tokens": comp, "total_tokens": tot, "tok_per_sec": tps})
+		metrics = runMetrics{
+			Run:              run,
+			Model:            model,
+			Stream:           stream,
+			PromptTokens:     promptTokens,
+			CompletionTokens: ok.Usage.CompletionTokens,
+			TotalTokens:      ok.Usage.TotalTokens,
+			LatencyMs:        elapsed.Seconds() * 1e3,
+			TokPerSec:        float64(ok.Usage.TotalTokens) / elapsed.Seconds(),
+		}
+		logEvent(run, "success", metrics.ToMap())
+		if storeData {
+			err, filename := storeRunData(dataDir, run, "response", string(raw))
+			if err != nil {
+				logEvent(run, "error", logFields{"type": "store_data", "error": err.Error()})
+			}
+			logEvent(run, "response-stored", logFields{"file": filename})
+			data, err := json.Marshal(metrics)
+			if err != nil {
+				logEvent(run, "error", logFields{"type": "json_marshal", "error": err.Error()})
+			}
+			err, filename = storeRunData(dataDir, run, "metrics", string(data))
+			if err != nil {
+				logEvent(run, "error", logFields{"type": "store_data", "error": err.Error()})
+			}
+			logEvent(run, "metrics-stored", logFields{"file": filename})
+		}
 	}
 
-	ch <- metric{comp: comp, tot: tot, tps: tps}
+	ch <- metrics
 }
 
 func main() {
@@ -246,9 +350,19 @@ func main() {
 			&cli.StringFlag{Name: "model", Value: "gpt-4o-mini", Usage: "model ID"},
 			&cli.StringFlag{Name: "prompt", Value: "Explain the fundamental concepts of relativity in detail.", Usage: "user message"},
 			&cli.DurationFlag{Name: "timeout", Value: 60 * time.Second, Usage: "HTTP timeout (ignored in streaming)"},
+			&cli.BoolFlag{Name: "unload-model", Value: false, Usage: "unload model after all runs complete (Ollama only)"},
+			&cli.StringFlag{Name: "data-dir", Value: "./runs", Usage: "directory to save data files"},
+			&cli.BoolFlag{Name: "store-data", Value: false, Usage: "store data files (responses, metrics)"},
 		},
 		Action: func(c *cli.Context) error {
 			style := strings.ToLower(c.String("style"))
+
+			dataDir := c.String("data-dir")
+			storeData := c.Bool("store-data")
+			if storeData && dataDir == "" {
+				return cli.Exit("data-dir must be set when store-data is enabled", 1)
+			}
+
 			apiKey := c.String("key")
 			if style != "ollama" && apiKey == "" {
 				return cli.Exit("missing API key (use --key or set LLM_API_KEY)", 1)
@@ -267,7 +381,7 @@ func main() {
 				client = &http.Client{Timeout: c.Duration("timeout")}
 			}
 
-			results := make(chan metric, runs)
+			results := make(chan runMetrics, runs)
 			var wg sync.WaitGroup
 			sem := make(chan struct{}, conc)
 
@@ -285,6 +399,7 @@ func main() {
 						style,
 						c.Bool("stream"),
 						results, &wg,
+						dataDir, storeData,
 					)
 				}(i)
 			}
@@ -298,9 +413,9 @@ func main() {
 			var sumTPS float64
 			var good int
 			for m := range results {
-				sumC += m.comp
-				sumT += m.tot
-				sumTPS += m.tps
+				sumC += m.CompletionTokens
+				sumT += m.TotalTokens
+				sumTPS += m.TokPerSec
 				good++
 			}
 
@@ -313,6 +428,26 @@ func main() {
 				fmt.Printf("Total completion tokens  : %d\n", sumC)
 				fmt.Printf("Total tokens             : %d\n", sumT)
 			}
+
+			if style == "ollama" && c.Bool("unload-model") {
+				endpoint := strings.TrimRight(c.String("base-url"), "/") + "/chat"
+				body, _ := json.Marshal(map[string]any{
+					"model":      c.String("model"),
+					"keep_alive": 0,
+				})
+				req, _ := http.NewRequestWithContext(c.Context, "POST", endpoint, bytes.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				resp, err := client.Do(req)
+				if err != nil {
+					return fmt.Errorf("error unloading model: %w", err)
+				}
+				defer resp.Body.Close()
+				if resp.StatusCode != http.StatusOK {
+					raw, _ := io.ReadAll(resp.Body)
+					return fmt.Errorf("error unloading model: %s (status code %d)", strings.TrimSpace(string(raw)), resp.StatusCode)
+				}
+			}
+
 			return nil
 		},
 	}
