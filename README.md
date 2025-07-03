@@ -10,11 +10,13 @@ Though, better fit for benchmarking than production use, it provides a simple wa
 - Measure response latency, token usage, and tokens-per-second
 - Approximate token counts for Ollama responses
 - Optional **streaming** mode (SSE) for real-time output
+- Optionally **store** each response and per-run metrics on disk via `--store-data`
+- Automatically **unload** Ollama models after the benchmark with `--unload-model`
 
 ## Installation
 
 ```bash
-# Requires Go 1.20+
+# Requires Go 1.18+
 go install go.codycody31.dev/llmbench@latest
 ```
 
@@ -38,6 +40,9 @@ llmbench [flags]
 | `--model`        | `gpt-4o-mini`                        | Model ID                                         |
 | `--prompt`       | `Explain the fundamental concepts...`| The user message to send                        |
 | `--timeout`      | `60s`                                | HTTP client timeout (disabled in streaming mode) |
+| `--unload-model` | `false`                              | Unload model after all runs complete (Ollama only) |
+| `--data-dir`     | `./runs`                             | Directory to store responses and metrics           |
+| `--store-data`   | `false`                              | Store responses and per-run metrics to `--data-dir`|
 
 ## Examples
 
@@ -60,34 +65,6 @@ llmbench --style openai --stream \
 llmbench --style ollama --stream \
          --base-url http://localhost:11434 \
          --runs 1 --model llama2 --prompt "How are you today?"
-```
-
-## Output
-
-Each run prints per-call logs (or real-time chunks in streaming mode), for example:
-
-```
-Run 001 │ 120.3 ms │ completion=256 │ total=300 │ 2.1 tok/s
-```
-
-Or, with streaming:
-
-```
-Run 001 │ ─── stream start ───
-Hello, this is a streaming response...
-Run 001 │ ─── stream end ───
-```
-
-At the end, a summary is printed:
-
-```
-=== Summary ===
-Successful calls  : 20 / 20
-Avg completion tokens    : 215.35
-Avg total tokens         : 260.40
-Avg tokens / sec         : 3.40
-Total completion tokens  : 4307
-Total tokens             : 5208
 ```
 
 ## License

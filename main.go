@@ -420,7 +420,7 @@ func main() {
 			}
 
 			fmt.Printf("\n=== Summary ===\n")
-			fmt.Printf("Successful calls  : %d / %d\n", good, runs)
+			fmt.Printf("Successful calls         : %d / %d\n", good, runs)
 			if good > 0 {
 				fmt.Printf("Avg completion tokens    : %.2f\n", float64(sumC)/float64(good))
 				fmt.Printf("Avg total tokens         : %.2f\n", float64(sumT)/float64(good))
